@@ -76,6 +76,16 @@ app.get('/api/admin/orders', requireAdmin, async (req, res) => {
     res.json({ orders: result.rows });
   } catch (e) { console.error('List orders failed:', e.message); res.status(500).json({ error: 'Could not load orders.' }); }
 });
+app.delete('/api/admin/orders/:id', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM crafia_orders WHERE public_id=$1 RETURNING public_id AS id', [req.params.id]);
+    if (!result.rowCount) return res.status(404).json({ error: 'Order not found.' });
+    res.json({ deleted: true, id: result.rows[0].id });
+  } catch (e) {
+    console.error('Delete order failed:', e.message);
+    res.status(500).json({ error: 'Could not delete order.' });
+  }
+});
 app.patch('/api/admin/orders/:id/status', requireAdmin, async (req, res) => {
   const allowed = ['Pending', 'Confirmed', 'Preparing', 'Shipped', 'Delivered', 'Cancelled'];
   const status = String((req.body || {}).status || '');
