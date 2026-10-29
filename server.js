@@ -31,7 +31,7 @@ function requireAdmin(req, res, next) {
 }
 async function initDb() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-  await pool.query(\`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS crafia_orders (
       id BIGSERIAL PRIMARY KEY,
       public_id TEXT UNIQUE NOT NULL,
@@ -47,7 +47,7 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  \`);
+  `);
 }
 app.get('/api/health', async (req, res) => {
   try { await pool.query('SELECT 1'); res.json({ status: 'ok', database: 'connected' }); }
@@ -69,10 +69,10 @@ app.post('/api/admin/login', (req, res) => {
 });
 app.get('/api/admin/orders', requireAdmin, async (req, res) => {
   try {
-    const result = await pool.query(\`SELECT public_id AS id, customer_name AS name,
+    const result = await pool.query(`SELECT public_id AS id, customer_name AS name,
       customer_phone AS phone, customer_address AS address, customer_district AS district,
       payment_method AS payment, customer_note AS note, items, total_bdt AS total,
-      status, created_at AS "createdAt" FROM crafia_orders ORDER BY created_at DESC LIMIT 500\`);
+      status, created_at AS "createdAt" FROM crafia_orders ORDER BY created_at DESC LIMIT 500`);
     res.json({ orders: result.rows });
   } catch (e) { console.error('List orders failed:', e.message); res.status(500).json({ error: 'Could not load orders.' }); }
 });
@@ -116,8 +116,8 @@ app.post('/api/orders', async (req, res) => {
   const publicId = 'CF-' + crypto.randomBytes(4).toString('hex').toUpperCase();
   try {
     await pool.query(
-      \`INSERT INTO crafia_orders (public_id, customer_name, customer_phone, customer_address, customer_district, payment_method, customer_note, items, total_bdt)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)\`,
+      `INSERT INTO crafia_orders (public_id, customer_name, customer_phone, customer_address, customer_district, payment_method, customer_note, items, total_bdt)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [publicId, name, phone, address, district, payment, note, JSON.stringify(cleanItems), total]
     );
     res.status(201).json({ order: { id: publicId, name, phone, address, district, payment, note, items: cleanItems, total, status: 'Pending' }, whatsappNumber: WHATSAPP_NUMBER });
