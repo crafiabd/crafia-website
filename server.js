@@ -58,8 +58,9 @@ app.get('/api/health', async (req, res) => {
 });
 app.get('/api/store-config', async (req, res) => {
   try {
-    const result = await pool.query("SELECT value FROM crafia_store_settings WHERE key='payment_number'");
-    res.json({ whatsappNumber: WHATSAPP_NUMBER, paymentNumber: result.rows[0]?.value || '' });
+    const result = await pool.query("SELECT key, value FROM crafia_store_settings WHERE key IN ('payment_number','bkash_number','nagad_number')");
+    const settings = Object.fromEntries(result.rows.map(row => [row.key, row.value]));
+    res.json({ whatsappNumber: WHATSAPP_NUMBER, paymentNumber: settings.payment_number || '', bkashNumber: settings.bkash_number || '', nagadNumber: settings.nagad_number || '' });
   } catch (e) { res.status(500).json({ error: 'Could not load store settings.' }); }
 });
 
@@ -79,15 +80,23 @@ app.get('/api/admin/settings', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query("SELECT key, value FROM crafia_store_settings");
     const settings = Object.fromEntries(result.rows.map(row => [row.key, row.value]));
-    res.json({ paymentNumber: settings.payment_number || '' });
+    res.json({ paymentNumber: settings.payment_number || '', bkashNumber: settings.bkash_number || '', nagadNumber: settings.nagad_number || '' });
   } catch (e) { res.status(500).json({ error: 'Could not load store settings.' }); }
 });
 app.put('/api/admin/settings', requireAdmin, async (req, res) => {
-  const paymentNumber = String((req.body || {}).paymentNumber || '').replace(/[^0-9+]/g, '').slice(0, 20);
-  if (paymentNumber && paymentNumber.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'Please enter a valid payment number.' });
+  const body = req.body || {};
+  const cleanNumber = value => String(value || '').replace(/[^0-9+]/g, '').slice(0, 20);
+  const paymentNumber = cleanNumber(body.paymentNumber);
+  const bkashNumber = cleanNumber(body.bkashNumber);
+  const nagadNumber = cleanNumber(body.nagadNumber);
+  for (const [label, value] of [['Cash on delivery',paymentNumber],['bKash',bkashNumber],['Nagad',nagadNumber]]) {
+    if (value && value.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'Please enter a valid '+label+' number.' });
+  }
   try {
-    await pool.query("INSERT INTO crafia_store_settings (key, value) VALUES ('payment_number',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [paymentNumber]);
-    res.json({ saved: true, paymentNumber });
+    for (const [key, value] of [['payment_number',paymentNumber],['bkash_number',bkashNumber],['nagad_number',nagadNumber]]) {
+      await pool.query("INSERT INTO crafia_store_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [key,value]);
+    }
+    res.json({ saved: true, paymentNumber, bkashNumber, nagadNumber });
   } catch (e) { console.error('Save store settings failed:', e.message); res.status(500).json({ error: 'Could not save store settings.' }); }
 });
 app.get('/api/admin/orders', requireAdmin, async (req, res) => {
