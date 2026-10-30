@@ -227,16 +227,33 @@ app.post('/api/orders', async (req, res) => {
   total = Math.round(total * 100) / 100;
   if (total <= 0 || total > 100000000) return res.status(400).json({ error: 'Order total is invalid.' });
   const publicId = 'CF-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+  const client = await pool.connect();
   try {
-    await pool.query(
+    await client.query('BEGIN');
+    for (const item of cleanItems) {
+      const stock = await client.query('SELECT quantity FROM crafia_inventory WHERE product_id=$1 FOR UPDATE', [item.id]);
+      if (stock.rowCount) {
+        if (Number(stock.rows[0].quantity) < item.qty) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: item.name + ' has only ' + stock.rows[0].quantity + ' left in stock.' });
+        }
+        await client.query('UPDATE crafia_inventory SET quantity=quantity-$1,updated_at=NOW() WHERE product_id=$2', [item.qty,item.id]);
+      }
+    }
+    await client.query(
       `INSERT INTO crafia_orders (public_id, customer_name, customer_phone, customer_address, customer_district, payment_method, customer_note, transaction_ref, items, total_bdt)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [publicId, name, phone, address, district, payment, note, transactionRef, JSON.stringify(cleanItems), total]
     );
+    await client.query('COMMIT');
     const order = { id: publicId, name, phone, address, district, payment, note, transactionRef, items: cleanItems, total, status: 'Pending' };
     sendOrderNotification(order).catch(err => console.error('Order notification email failed:', err.message));
     res.status(201).json({ order, whatsappNumber: WHATSAPP_NUMBER });
-  } catch (e) { console.error('Create order failed:', e.message); res.status(500).json({ error: 'Your order could not be saved. Please try again or contact us on WhatsApp.' }); }
+  } catch (e) {
+    await client.query('ROLLBACK').catch(()=>{});
+    console.error('Create order failed:', e.message);
+    res.status(500).json({ error: 'Your order could not be saved. Please try again or contact us on WhatsApp.' });
+  } finally { client.release(); }
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
