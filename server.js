@@ -226,6 +226,18 @@ app.post('/api/orders', async (req, res) => {
   }
   total = Math.round(total * 100) / 100;
   if (total <= 0 || total > 100000000) return res.status(400).json({ error: 'Order total is invalid.' });
+  let couponDiscount = 0;
+  const couponCode = String(body.couponCode || '').trim().toUpperCase();
+  if (couponCode) {
+    try {
+      const cq = await pool.query('SELECT * FROM crafia_coupons WHERE code=$1 AND active=TRUE AND (expires_at IS NULL OR expires_at>NOW())',[couponCode]);
+      if (!cq.rowCount) return res.status(400).json({error:'Coupon is invalid or expired.'});
+      const c=cq.rows[0];
+      if(total<Number(c.min_order)) return res.status(400).json({error:'Minimum order for this coupon is ৳'+Number(c.min_order).toFixed(0)});
+      couponDiscount=Math.min(total,c.discount_type==='percent'?total*Number(c.discount_value)/100:Number(c.discount_value));
+      total=Math.round((total-couponDiscount)*100)/100;
+    } catch(e) { return res.status(500).json({error:'Could not validate coupon.'}); }
+  }
   const publicId = 'CF-' + crypto.randomBytes(4).toString('hex').toUpperCase();
   const client = await pool.connect();
   try {
@@ -246,7 +258,7 @@ app.post('/api/orders', async (req, res) => {
       [publicId, name, phone, address, district, payment, note, transactionRef, JSON.stringify(cleanItems), total]
     );
     await client.query('COMMIT');
-    const order = { id: publicId, name, phone, address, district, payment, note, transactionRef, items: cleanItems, total, status: 'Pending' };
+    const order = { id: publicId, name, phone, address, district, payment, note, transactionRef, items: cleanItems, total, couponCode, couponDiscount, status: 'Pending' };
     sendOrderNotification(order).catch(err => console.error('Order notification email failed:', err.message));
     res.status(201).json({ order, whatsappNumber: WHATSAPP_NUMBER });
   } catch (e) {
