@@ -65,6 +65,10 @@ async function initDb() {
   `);
   await pool.query(`ALTER TABLE crafia_orders ADD COLUMN IF NOT EXISTS transaction_ref TEXT NOT NULL DEFAULT ''`);
   await pool.query(`CREATE TABLE IF NOT EXISTS crafia_store_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS crafia_inventory (product_id TEXT PRIMARY KEY, quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS crafia_coupons (code TEXT PRIMARY KEY, discount_type TEXT NOT NULL CHECK (discount_type IN ('percent','fixed')), discount_value NUMERIC(12,2) NOT NULL CHECK (discount_value > 0), min_order NUMERIC(12,2) NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, expires_at TIMESTAMPTZ)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS crafia_reviews (id BIGSERIAL PRIMARY KEY, order_id TEXT NOT NULL, product_id TEXT NOT NULL, customer_name TEXT NOT NULL, customer_email TEXT NOT NULL DEFAULT '', rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5), review_text TEXT NOT NULL, photo_url TEXT NOT NULL DEFAULT '', approved BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(order_id, product_id))`);
+
 }
 app.get('/api/health', async (req, res) => {
   try { await pool.query('SELECT 1'); res.json({ status: 'ok', database: 'connected' }); }
@@ -142,6 +146,58 @@ app.patch('/api/admin/orders/:id/status', requireAdmin, async (req, res) => {
     res.json({ order: result.rows[0] });
   } catch (e) { console.error('Update order failed:', e.message); res.status(500).json({ error: 'Could not update order.' }); }
 });
+
+app.get('/api/inventory', async (req,res) => {
+  try { const q=await pool.query('SELECT product_id AS "productId", quantity FROM crafia_inventory'); res.json({inventory:q.rows}); }
+  catch(e){res.status(500).json({error:'Could not load stock.'});}
+});
+app.put('/api/admin/inventory/:productId', requireAdmin, async (req,res) => {
+  const quantity=Number((req.body||{}).quantity);
+  if(!Number.isInteger(quantity)||quantity<0||quantity>100000) return res.status(400).json({error:'Enter a valid stock quantity.'});
+  try { const q=await pool.query('INSERT INTO crafia_inventory(product_id,quantity) VALUES($1,$2) ON CONFLICT(product_id) DO UPDATE SET quantity=EXCLUDED.quantity,updated_at=NOW() RETURNING product_id AS "productId",quantity',[String(req.params.productId).slice(0,100),quantity]); res.json({stock:q.rows[0]}); }
+  catch(e){res.status(500).json({error:'Could not update stock.'});}
+});
+app.get('/api/admin/inventory', requireAdmin, async (req,res) => {
+  try { const q=await pool.query('SELECT product_id AS "productId",quantity,updated_at AS "updatedAt" FROM crafia_inventory ORDER BY product_id'); res.json({inventory:q.rows}); }
+  catch(e){res.status(500).json({error:'Could not load inventory.'});}
+});
+app.post('/api/admin/coupons', requireAdmin, async (req,res) => {
+  const b=req.body||{}, code=String(b.code||'').trim().toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,40), type=b.discountType;
+  const value=Number(b.discountValue), min=Number(b.minOrder||0);
+  if(!code||!['percent','fixed'].includes(type)||!Number.isFinite(value)||value<=0||(type==='percent'&&value>100)||!Number.isFinite(min)||min<0) return res.status(400).json({error:'Check coupon code and discount values.'});
+  try { const q=await pool.query('INSERT INTO crafia_coupons(code,discount_type,discount_value,min_order,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(code) DO UPDATE SET discount_type=EXCLUDED.discount_type,discount_value=EXCLUDED.discount_value,min_order=EXCLUDED.min_order,expires_at=EXCLUDED.expires_at,active=TRUE RETURNING *',[code,type,value,min,b.expiresAt||null]); res.json({coupon:q.rows[0]}); }
+  catch(e){res.status(500).json({error:'Could not save coupon.'});}
+});
+app.get('/api/admin/coupons', requireAdmin, async (req,res) => {
+  try { const q=await pool.query('SELECT code,discount_type AS "discountType",discount_value AS "discountValue",min_order AS "minOrder",active,expires_at AS "expiresAt" FROM crafia_coupons ORDER BY code'); res.json({coupons:q.rows}); }
+  catch(e){res.status(500).json({error:'Could not load coupons.'});}
+});
+app.post('/api/coupons/validate', async (req,res) => {
+  const code=String((req.body||{}).code||'').trim().toUpperCase(), subtotal=Number((req.body||{}).subtotal);
+  if(!code||!Number.isFinite(subtotal)||subtotal<0) return res.status(400).json({error:'Enter a valid coupon and order subtotal.'});
+  try { const q=await pool.query('SELECT * FROM crafia_coupons WHERE code=$1 AND active=TRUE AND (expires_at IS NULL OR expires_at>NOW())',[code]); if(!q.rowCount) return res.status(404).json({error:'Coupon is invalid or expired.'}); const c=q.rows[0]; if(subtotal<Number(c.min_order)) return res.status(400).json({error:'Minimum order for this coupon is ৳'+Number(c.min_order).toFixed(0)}); const discount=Math.min(subtotal,c.discount_type==='percent'?subtotal*Number(c.discount_value)/100:Number(c.discount_value)); res.json({valid:true,code,discount:Number(discount.toFixed(2)),total:Number((subtotal-discount).toFixed(2))}); }
+  catch(e){res.status(500).json({error:'Could not validate coupon.'});}
+});
+app.get('/api/admin/reviews', requireAdmin, async (req,res) => {
+  try { const q=await pool.query('SELECT id,order_id AS "orderId",product_id AS "productId",customer_name AS "customerName",customer_email AS "customerEmail",rating,review_text AS review,"photo_url" AS "photoUrl",approved,created_at AS "createdAt" FROM crafia_reviews ORDER BY created_at DESC'); res.json({reviews:q.rows}); }
+  catch(e){res.status(500).json({error:'Could not load reviews.'});}
+});
+app.patch('/api/admin/reviews/:id', requireAdmin, async (req,res) => {
+  const approved=(req.body||{}).approved; if(typeof approved!=='boolean') return res.status(400).json({error:'Choose approve or reject.'});
+  try { const q=await pool.query('UPDATE crafia_reviews SET approved=$1 WHERE id=$2 RETURNING id,approved',[approved,req.params.id]); if(!q.rowCount)return res.status(404).json({error:'Review not found.'}); res.json({review:q.rows[0]}); }
+  catch(e){res.status(500).json({error:'Could not update review.'});}
+});
+app.get('/api/reviews/:productId', async (req,res) => {
+  try { const q=await pool.query('SELECT customer_name AS "customerName",rating,review_text AS review,photo_url AS "photoUrl",created_at AS "createdAt" FROM crafia_reviews WHERE product_id=$1 AND approved=TRUE ORDER BY created_at DESC',[req.params.productId]); res.json({reviews:q.rows}); }
+  catch(e){res.status(500).json({error:'Could not load reviews.'});}
+});
+app.post('/api/reviews', async (req,res) => {
+  const b=req.body||{}, orderId=String(b.orderId||'').trim(), productId=String(b.productId||'').trim(), rating=Number(b.rating), review=String(b.review||'').trim().slice(0,3000), email=String(b.email||'').trim().slice(0,200), photoUrl=String(b.photoUrl||'').trim().slice(0,1000);
+  if(!orderId||!productId||!Number.isInteger(rating)||rating<1||rating>5||!review) return res.status(400).json({error:'Complete the review details.'});
+  try { const order=await pool.query("SELECT customer_name,items FROM crafia_orders WHERE public_id=$1 AND status='Delivered'",[orderId]); if(!order.rowCount)return res.status(403).json({error:'Reviews are available only after an order is marked Delivered.'}); if(!(order.rows[0].items||[]).some(i=>String(i.id)===productId))return res.status(403).json({error:'This product is not part of that order.'}); const q=await pool.query('INSERT INTO crafia_reviews(order_id,product_id,customer_name,customer_email,rating,review_text,photo_url) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id',[orderId,productId,order.rows[0].customer_name,email,rating,review,photoUrl]); res.status(201).json({submitted:true,reviewId:q.rows[0].id,message:'Review submitted for approval.'}); }
+  catch(e){ if(e.code==='23505')return res.status(409).json({error:'A review for this product and order has already been submitted.'}); res.status(500).json({error:'Could not submit review.'});}
+});
+
 app.post('/api/orders', async (req, res) => {
   const body = req.body || {};
   const name = String(body.name || '').trim().slice(0, 120);
