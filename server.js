@@ -29,6 +29,20 @@ function requireAdmin(req, res, next) {
   }
   next();
 }
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+async function sendOrderNotification(order) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM_EMAIL;
+  const to = process.env.ORDER_NOTIFICATION_EMAIL || 'crafiabd@gmail.com';
+  if (!apiKey || !from) { console.warn('Order email not sent: configure RESEND_API_KEY and RESEND_FROM_EMAIL.'); return; }
+  const rows = order.items.map(item => '<tr><td style="padding:8px;border-bottom:1px solid #eee">' + escapeHtml(item.name) + '</td><td style="padding:8px;border-bottom:1px solid #eee">' + item.qty + '</td><td style="padding:8px;border-bottom:1px solid #eee">৳' + (item.price * item.qty).toFixed(2) + '</td></tr>').join('');
+  const html = '<div style="font-family:Arial,sans-serif;color:#333;max-width:640px;margin:auto"><h2 style="color:#b34d83">🌸 New CRAFIA order!</h2><p>A customer has placed a new order.</p><p><b>Order ID:</b> ' + escapeHtml(order.id) + '<br><b>Customer:</b> ' + escapeHtml(order.name) + '<br><b>Phone:</b> ' + escapeHtml(order.phone) + '<br><b>Address:</b> ' + escapeHtml(order.address) + ', ' + escapeHtml(order.district) + '<br><b>Payment:</b> ' + escapeHtml(order.payment) + '<br><b>Transaction ID:</b> ' + escapeHtml(order.transactionRef || 'Not provided') + '<br><b>Note:</b> ' + escapeHtml(order.note || '—') + '</p><table style="border-collapse:collapse;width:100%;text-align:left"><thead><tr><th style="padding:8px">Product</th><th style="padding:8px">Qty</th><th style="padding:8px">Subtotal</th></tr></thead><tbody>' + rows + '</tbody></table><h3>Total: ৳' + Number(order.total).toFixed(2) + '</h3><p>Status: Pending</p></div>';
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ from, to: [to], subject: 'New CRAFIA order ' + order.id, html }) });
+  if (!response.ok) throw new Error('Resend email error: ' + response.status + ' ' + await response.text());
+}
+
 async function initDb() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
   await pool.query(`
@@ -103,7 +117,7 @@ app.get('/api/admin/orders', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(`SELECT public_id AS id, customer_name AS name,
       customer_phone AS phone, customer_address AS address, customer_district AS district,
-      payment_method AS payment, customer_note AS note, items, total_bdt AS total,
+      payment_method AS payment, customer_note AS note, transaction_ref AS "transactionRef", items, total_bdt AS total,
       status, created_at AS "createdAt" FROM crafia_orders ORDER BY created_at DESC LIMIT 500`);
     res.json({ orders: result.rows });
   } catch (e) { console.error('List orders failed:', e.message); res.status(500).json({ error: 'Could not load orders.' }); }
@@ -163,7 +177,9 @@ app.post('/api/orders', async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [publicId, name, phone, address, district, payment, note, transactionRef, JSON.stringify(cleanItems), total]
     );
-    res.status(201).json({ order: { id: publicId, name, phone, address, district, payment, note, transactionRef, items: cleanItems, total, status: 'Pending' }, whatsappNumber: WHATSAPP_NUMBER });
+    const order = { id: publicId, name, phone, address, district, payment, note, transactionRef, items: cleanItems, total, status: 'Pending' };
+    sendOrderNotification(order).catch(err => console.error('Order notification email failed:', err.message));
+    res.status(201).json({ order, whatsappNumber: WHATSAPP_NUMBER });
   } catch (e) { console.error('Create order failed:', e.message); res.status(500).json({ error: 'Your order could not be saved. Please try again or contact us on WhatsApp.' }); }
 });
 
