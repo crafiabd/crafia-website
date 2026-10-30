@@ -41,6 +41,7 @@ async function initDb() {
       customer_district TEXT NOT NULL,
       payment_method TEXT NOT NULL,
       customer_note TEXT NOT NULL DEFAULT '',
+      transaction_ref TEXT NOT NULL DEFAULT '',
       items JSONB NOT NULL,
       total_bdt NUMERIC(12,2) NOT NULL,
       status TEXT NOT NULL DEFAULT 'Pending',
@@ -48,12 +49,19 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(`ALTER TABLE crafia_orders ADD COLUMN IF NOT EXISTS transaction_ref TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS crafia_store_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
 }
 app.get('/api/health', async (req, res) => {
   try { await pool.query('SELECT 1'); res.json({ status: 'ok', database: 'connected' }); }
   catch (e) { res.status(503).json({ status: 'error', database: 'disconnected' }); }
 });
-app.get('/api/store-config', (req, res) => res.json({ whatsappNumber: WHATSAPP_NUMBER }));
+app.get('/api/store-config', async (req, res) => {
+  try {
+    const result = await pool.query("SELECT value FROM crafia_store_settings WHERE key='payment_number'");
+    res.json({ whatsappNumber: WHATSAPP_NUMBER, paymentNumber: result.rows[0]?.value || '' });
+  } catch (e) { res.status(500).json({ error: 'Could not load store settings.' }); }
+});
 
 app.post('/api/admin/login', (req, res) => {
   if (!ADMIN_PASSWORD) return res.status(503).json({ error: 'Admin login is not configured on the server yet.' });
@@ -66,6 +74,21 @@ app.post('/api/admin/login', (req, res) => {
   const token = crypto.randomBytes(32).toString('hex');
   sessions.set(token, { expires: Date.now() + 8 * 60 * 60 * 1000 });
   res.json({ token, expiresIn: 28800 });
+});
+app.get('/api/admin/settings', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT key, value FROM crafia_store_settings");
+    const settings = Object.fromEntries(result.rows.map(row => [row.key, row.value]));
+    res.json({ paymentNumber: settings.payment_number || '' });
+  } catch (e) { res.status(500).json({ error: 'Could not load store settings.' }); }
+});
+app.put('/api/admin/settings', requireAdmin, async (req, res) => {
+  const paymentNumber = String((req.body || {}).paymentNumber || '').replace(/[^0-9+]/g, '').slice(0, 20);
+  if (paymentNumber && paymentNumber.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'Please enter a valid payment number.' });
+  try {
+    await pool.query("INSERT INTO crafia_store_settings (key, value) VALUES ('payment_number',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [paymentNumber]);
+    res.json({ saved: true, paymentNumber });
+  } catch (e) { console.error('Save store settings failed:', e.message); res.status(500).json({ error: 'Could not save store settings.' }); }
 });
 app.get('/api/admin/orders', requireAdmin, async (req, res) => {
   try {
@@ -104,6 +127,7 @@ app.post('/api/orders', async (req, res) => {
   const district = String(body.district || '').trim().slice(0, 100);
   const payment = String(body.payment || '').trim().slice(0, 80);
   const note = String(body.note || '').trim().slice(0, 1000);
+  const transactionRef = String(body.transactionRef || '').trim().slice(0, 100);
   const items = Array.isArray(body.items) ? body.items : [];
   if (!name || !phone || !address || !district || !payment || !items.length || items.length > 50) {
     return res.status(400).json({ error: 'Please complete all required fields and add at least one item.' });
@@ -126,11 +150,11 @@ app.post('/api/orders', async (req, res) => {
   const publicId = 'CF-' + crypto.randomBytes(4).toString('hex').toUpperCase();
   try {
     await pool.query(
-      `INSERT INTO crafia_orders (public_id, customer_name, customer_phone, customer_address, customer_district, payment_method, customer_note, items, total_bdt)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [publicId, name, phone, address, district, payment, note, JSON.stringify(cleanItems), total]
+      `INSERT INTO crafia_orders (public_id, customer_name, customer_phone, customer_address, customer_district, payment_method, customer_note, transaction_ref, items, total_bdt)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [publicId, name, phone, address, district, payment, note, transactionRef, JSON.stringify(cleanItems), total]
     );
-    res.status(201).json({ order: { id: publicId, name, phone, address, district, payment, note, items: cleanItems, total, status: 'Pending' }, whatsappNumber: WHATSAPP_NUMBER });
+    res.status(201).json({ order: { id: publicId, name, phone, address, district, payment, note, transactionRef, items: cleanItems, total, status: 'Pending' }, whatsappNumber: WHATSAPP_NUMBER });
   } catch (e) { console.error('Create order failed:', e.message); res.status(500).json({ error: 'Your order could not be saved. Please try again or contact us on WhatsApp.' }); }
 });
 
