@@ -178,6 +178,41 @@ app.post('/api/coupons/validate', async (req,res) => {
   try { const q=await pool.query('SELECT * FROM crafia_coupons WHERE code=$1 AND active=TRUE AND (expires_at IS NULL OR expires_at>NOW())',[code]); if(!q.rowCount) return res.status(404).json({error:'Coupon is invalid or expired.'}); const c=q.rows[0]; if(subtotal<Number(c.min_order)) return res.status(400).json({error:'Minimum order for this coupon is ৳'+Number(c.min_order).toFixed(0)}); const discount=Math.min(subtotal,c.discount_type==='percent'?subtotal*Number(c.discount_value)/100:Number(c.discount_value)); res.json({valid:true,code,discount:Number(discount.toFixed(2)),total:Number((subtotal-discount).toFixed(2))}); }
   catch(e){res.status(500).json({error:'Could not validate coupon.'});}
 });
+
+app.get('/api/thank-you', async (req,res) => {
+  try {
+    const settings=await pool.query("SELECT key,value FROM crafia_store_settings WHERE key IN ('thank_you_message','thank_you_coupon_code','thank_you_enabled')");
+    const s=Object.fromEntries(settings.rows.map(x=>[x.key,x.value]));
+    const enabled=s.thank_you_enabled!=='false';
+    let coupon=null;
+    if(s.thank_you_coupon_code){
+      const q=await pool.query('SELECT code,discount_type AS "discountType",discount_value AS "discountValue",min_order AS "minOrder",expires_at AS "expiresAt" FROM crafia_coupons WHERE code=$1 AND active=TRUE AND (expires_at IS NULL OR expires_at>NOW())',[s.thank_you_coupon_code]);
+      if(q.rowCount)coupon=q.rows[0];
+    }
+    res.json({enabled,message:s.thank_you_message||'Thank you for supporting our little handmade business! Every CRAFIA creation is made with love, just for you. We hope it brings a little happiness to your day!',coupon});
+  } catch(e){res.status(500).json({error:'Could not load the CRAFIA thank-you page.'});}
+});
+app.get('/api/admin/thank-you', requireAdmin, async (req,res) => {
+  try {
+    const q=await pool.query("SELECT key,value FROM crafia_store_settings WHERE key IN ('thank_you_message','thank_you_coupon_code','thank_you_enabled')");
+    const s=Object.fromEntries(q.rows.map(x=>[x.key,x.value]));
+    res.json({message:s.thank_you_message||'',couponCode:s.thank_you_coupon_code||'',enabled:s.thank_you_enabled!=='false'});
+  } catch(e){res.status(500).json({error:'Could not load thank-you settings.'});}
+});
+app.put('/api/admin/thank-you', requireAdmin, async (req,res) => {
+  const b=req.body||{}, message=String(b.message||'').trim().slice(0,700), couponCode=String(b.couponCode||'').trim().toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,40), enabled=b.enabled!==false;
+  if(!message)return res.status(400).json({error:'Please add a thank-you message.'});
+  try {
+    if(couponCode){
+      const c=await pool.query("SELECT code FROM crafia_coupons WHERE code=$1 AND active=TRUE AND (expires_at IS NULL OR expires_at>NOW())",[couponCode]);
+      if(!c.rowCount)return res.status(400).json({error:'Choose an active, unexpired coupon.'});
+    }
+    for(const [key,value] of [['thank_you_message',message],['thank_you_coupon_code',couponCode],['thank_you_enabled',String(enabled)]]){
+      await pool.query("INSERT INTO crafia_store_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[key,value]);
+    }
+    res.json({saved:true,message,couponCode,enabled});
+  } catch(e){res.status(500).json({error:'Could not save thank-you settings.'});}
+});
 app.get('/api/admin/reviews', requireAdmin, async (req,res) => {
   try { const q=await pool.query('SELECT id,order_id AS "orderId",product_id AS "productId",customer_name AS "customerName",customer_email AS "customerEmail",rating,review_text AS review,"photo_url" AS "photoUrl",approved,created_at AS "createdAt" FROM crafia_reviews ORDER BY created_at DESC'); res.json({reviews:q.rows}); }
   catch(e){res.status(500).json({error:'Could not load reviews.'});}
