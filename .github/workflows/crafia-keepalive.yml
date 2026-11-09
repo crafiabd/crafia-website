@@ -1,0 +1,18 @@
+name: Keep CRAFIA Render API Warm
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping CRAFIA health endpoint
+        run: |
+          curl --fail --silent --show-error --max-time 30 \
+            https://crafia-api.onrender.com/api/health
